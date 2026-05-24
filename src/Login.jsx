@@ -5,10 +5,13 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
+  updateProfile, // 🆕 Firebase Profile update karne ke liye add kiya
 } from "firebase/auth";
+import { getFirestore, doc, setDoc } from "firebase/firestore"; // 🆕 Database update ke liye add kiya
 import app from "./firebase";
 
 const auth = getAuth(app);
+const db = getFirestore(app); // 🆕 Firestore database connect kiya
 
 function Login() {
   const navigate = useNavigate();
@@ -58,16 +61,37 @@ function Login() {
     }
   };
 
+  // 👑 UPDATE: Naye user ka naam blank rakhne ka aur logic setup karne ka function
   const registerWithEmail = async () => {
     setMessage("");
     if (!validateForm()) return;
     setLoading(true);
     try {
-      await createUserWithEmailAndPassword(auth, email, password);
-      setMessage("Registration successful! You can now log in.");
-      setIsRegistering(false);
-      setEmail("");
-      setPassword("");
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
+
+      // 1. Display name ko intentionally BLANK chhod diya
+      await updateProfile(user, {
+        displayName: ""
+      });
+
+      // 2. Database (Firestore) mein user ka document banaya jahan naam "" hai
+      await setDoc(doc(db, "users", user.uid), {
+        uid: user.uid,
+        email: user.email,
+        name: "", // 👈 Shuruat mein naam khali rahega
+        roomCode: "",
+        role: "Roommate",
+        createdAt: Date.now()
+      });
+
+      setMessage("Registration successful! Redirecting to dashboard...");
+      
+      // Data set hote hi direct user ko dashboard par bhej denge taaki wo apna naam daal sake
+      setTimeout(() => {
+        navigate("/dashboard");
+      }, 1500);
+
     } catch (error) {
       setError(getFirebaseErrorMessage(error));
     } finally {

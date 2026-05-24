@@ -1,8 +1,21 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { updatePassword, updateProfile } from "firebase/auth";
-import { doc, setDoc, getDoc, updateDoc, arrayUnion, collection, addDoc, query, where, onSnapshot, deleteDoc } from "firebase/firestore";
-import { auth, db } from "../firebase";
+import { updatePassword, updateProfile, getAuth, onAuthStateChanged } from "firebase/auth";
+import { doc, setDoc, getDoc, updateDoc, arrayUnion, collection, addDoc, query, where, onSnapshot, deleteDoc, getFirestore } from "firebase/firestore";
+import app from "../firebase"; // Your firebase config path
+import { GoogleGenAI } from "@google/genai"; // Gemini AI SDK
+
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+// 👑 SUPER ADMIN CONFIGURATION
+const SUPER_ADMIN_UID = "ZOp4VHe1vzg3NJXn0E1LGWq7rS42"; 
+
+// 🤖 GEMINI AI CONFIGURATION (FRONTEND COMPATIBLE WITH BROWSER ALLOWED)
+const ai = new GoogleGenAI({ 
+  apiKey: "AIzaSyAXKeYp8tKQywx5ob4_0YxMO7H8eU8mWaU",
+  dangerouslyAllowBrowser: true // Bypasses browser restriction blocks
+});
 
 function Dashboard() {
   const navigate = useNavigate();
@@ -19,6 +32,10 @@ function Dashboard() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [expenses, setExpenses] = useState([]);
   const [roomMembersCount, setRoomMembersCount] = useState(1);
+  const [currentUserId, setCurrentUserId] = useState(auth.currentUser?.uid || null);
+
+  // Super Admin Access Check
+  const isSuperAdmin = currentUserId === SUPER_ADMIN_UID;
 
   // Expense Form States
   const [title, setTitle] = useState("");
@@ -31,18 +48,18 @@ function Dashboard() {
   const [myRoomCode, setMyRoomCode] = useState("");
   const [myRoomName, setMyRoomName] = useState("");
 
-  // Chatbot States
+  // Chatbot States (Pure English Mode)
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [isTyping, setIsTyping] = useState(false); 
   const [chatMessages, setChatMessages] = useState([
-    { id: 1, sender: "bot", text: "Hello! Main aapka Roomies AI Assistant hoon. Expense split ya room management me koi dikkat hai? Poochhiye!", time: "Just now" }
+    { id: 1, sender: "bot", text: "Hello! I am your Roomies AI Assistant. I have live access to your expense records. Feel free to ask me any calculation or breakdown queries!", time: "Just now" }
   ]);
 
   // Profile States
   const [profile, setProfile] = useState({
-    name: auth.currentUser?.displayName || "Ankit Saklani",
-    email: auth.currentUser?.email || "ankit@example.com",
+    name: auth.currentUser?.displayName || "", 
+    email: auth.currentUser?.email || "",
     avatar: "",
     role: "User"
   });
@@ -101,11 +118,23 @@ function Dashboard() {
     }
   }, [myRoomCode, activeTab]);
 
-  // Firebase Realtime Observers
+  // Auth Status Observer
   useEffect(() => {
-    if (!auth.currentUser) return;
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setCurrentUserId(user.uid);
+      } else {
+        navigate("/");
+      }
+    });
+    return () => unsubscribeAuth();
+  }, [navigate]);
 
-    const userDocRef = doc(db, "users", auth.currentUser.uid);
+  // Firebase Firestore Profile Loader
+  useEffect(() => {
+    if (!currentUserId) return;
+
+    const userDocRef = doc(db, "users", currentUserId);
     getDoc(userDocRef).then((docSnap) => {
       if (docSnap.exists()) {
         const userData = docSnap.data();
@@ -115,16 +144,17 @@ function Dashboard() {
         }
         setProfile(prev => ({
           ...prev,
-          name: userData.name || prev.name,
+          name: userData.name || "", 
           avatar: userData.avatar || prev.avatar,
-          role: userData.role || "Roommate"
+          role: isSuperAdmin ? "Super Admin" : (userData.role || "Roommate")
         }));
       }
     });
-  }, []);
+  }, [currentUserId, isSuperAdmin]);
 
+  // Room Members Observer
   useEffect(() => {
-    if (!myRoomCode) return;
+    if (!myRoomCode || isSuperAdmin) return;
 
     const roomDocRef = doc(db, "rooms", myRoomCode);
     const unsubscribe = onSnapshot(roomDocRef, (docSnap) => {
@@ -137,15 +167,18 @@ function Dashboard() {
     });
 
     return () => unsubscribe();
-  }, [myRoomCode]);
+  }, [myRoomCode, isSuperAdmin]);
 
+  // Realtime Expenses Observer
   useEffect(() => {
-    if (!myRoomCode) {
-      setExpenses([]);
-      return;
+    let q;
+    if (isSuperAdmin) {
+      q = collection(db, "expenses"); 
+    } else {
+      if (!myRoomCode) { setExpenses([]); return; }
+      q = query(collection(db, "expenses"), where("roomCode", "==", myRoomCode));
     }
 
-    const q = query(collection(db, "expenses"), where("roomCode", "==", myRoomCode));
     const unsubscribe = onSnapshot(q, (querySnapshot) => {
       const expensesData = [];
       querySnapshot.forEach((doc) => {
@@ -156,32 +189,45 @@ function Dashboard() {
     });
 
     return () => unsubscribe();
-  }, [myRoomCode]);
+  }, [myRoomCode, isSuperAdmin]);
 
-  // Static Response Chatbot Function (Purana Code)
-  const handleSendMessage = (e) => {
+  // 🤖 LIVE GEMINI AI PROCESSING (Strict English System Instructions)
+  const handleSendMessage = async (e) => {
     e.preventDefault();
     if (!chatInput.trim()) return;
 
     const userMessage = chatInput.trim();
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     
-    // User message add karein
-    const newMsgList = [...chatMessages, { id: Date.now(), sender: "user", text: userMessage, time: timestamp }];
-    setChatMessages(newMsgList);
+    setChatMessages(prev => [...prev, { id: Date.now(), sender: "user", text: userMessage, time: timestamp }]);
     setChatInput("");
     setIsTyping(true); 
 
-    // 1 second ka artificial delay for static reply
-    setTimeout(() => {
-      setChatMessages(prev => [...prev, { 
-        id: Date.now() + 1, 
-        sender: "bot", 
-        text: "Hi! Agar aapko naya expense add karna hai toh top corner par '+ Add Expense' use karein. Hisaab-kitaab ke liye 'Settlements' tab check karein. Kisi zaroori human help ke liye call karein: +91 8930576568.", 
-        time: timestamp 
-      }]);
+    try {
+      const currentExpensesContext = expenses.map(exp => 
+        `Item: ${exp.title}, Amount: ₹${exp.amount}, Category: ${exp.category}, Paid By: ${exp.addedBy || "Unknown"}, Date: ${exp.date}`
+      ).join("\n");
+
+      const systemPrompt = `You are Roomies AI, an expert dashboard manager. You must respond strictly in standard English language. Use the live data provided below to answer user inquiries clearly, objectively, and accurately.
+      
+      Live Operational Dataset:
+      ${currentExpensesContext || "No expense records are currently stored."}
+      
+      User Query: ${userMessage}`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-1.5-flash', // Switched to stable browser-friendly endpoint
+        contents: systemPrompt,
+      });
+
+      const botReply = response.text || "I am unable to interpret that entry. Please try again.";
+      setChatMessages(prev => [...prev, { id: Date.now() + 1, sender: "bot", text: botReply, time: timestamp }]);
+    } catch (err) {
+      console.error(err);
+      setChatMessages(prev => [...prev, { id: Date.now() + 1, sender: "bot", text: "Connection Error: Please ensure network accessibility or verify API limits on Google Studio.", time: timestamp }]);
+    } finally {
       setIsTyping(false);
-    }, 1000);
+    }
   };
 
   const handleAddExpense = async (e) => {
@@ -190,7 +236,7 @@ function Dashboard() {
       alert("Please fill all fields correctly!");
       return;
     }
-    if (!myRoomCode) {
+    if (!myRoomCode && !isSuperAdmin) {
       alert("Please create or join a room first!");
       return;
     }
@@ -207,9 +253,9 @@ function Dashboard() {
         title: title.trim(),
         amount: parseFloat(amount),
         category: category,
-        roomCode: myRoomCode,
-        addedBy: profile.name,
-        addedById: auth.currentUser.uid,
+        roomCode: isSuperAdmin ? "GLOBAL_ADMIN" : myRoomCode,
+        addedBy: profile.name || "Anonymous User",
+        addedById: currentUserId,
         date: formattedDate,
         createdAt: Date.now()
       });
@@ -223,7 +269,7 @@ function Dashboard() {
   };
 
   const handleDeleteExpense = async (expenseId, addedById) => {
-    if (addedById !== auth.currentUser?.uid) {
+    if (!isSuperAdmin && addedById !== currentUserId) {
       alert("You can only delete your own expenses!");
       return;
     }
@@ -243,11 +289,11 @@ function Dashboard() {
     try {
       await setDoc(doc(db, "rooms", generatedCode), {
         roomName: roomName.trim(),
-        createdBy: auth.currentUser.uid,
+        createdBy: currentUserId,
         createdAt: Date.now(),
-        members: arrayUnion(auth.currentUser.uid)
+        members: arrayUnion(currentUserId)
       });
-      await setDoc(doc(db, "users", auth.currentUser.uid), {
+      await setDoc(doc(db, "users", currentUserId), {
         roomCode: generatedCode,
         roomName: roomName.trim(),
         role: "Admin"
@@ -273,8 +319,8 @@ function Dashboard() {
 
       if (roomSnap.exists()) {
         const roomData = roomSnap.data();
-        await updateDoc(roomDocRef, { members: arrayUnion(auth.currentUser.uid) });
-        await setDoc(doc(db, "users", auth.currentUser.uid), {
+        await updateDoc(roomDocRef, { members: arrayUnion(currentUserId) });
+        await setDoc(doc(db, "users", currentUserId), {
           roomCode: upperCode,
           roomName: roomData.roomName,
           role: "Roommate"
@@ -284,12 +330,12 @@ function Dashboard() {
         setMyRoomName(roomData.roomName);
         setProfile(prev => ({ ...prev, role: "Roommate" }));
         setInviteCodeInput("");
-        setProfileMessage(`Joined ${roomData.roomName}!`);
+        setProfileMessage(`Successfully joined ${roomData.roomName}!`);
       } else {
-        setProfileError("Invalid Code. Room not found.");
+        setProfileError("Invalid Code. Room data record not found.");
       }
     } catch (err) {
-      setProfileError("Error joining room.");
+      setProfileError("Error establishing connection with the selected room.");
     }
   };
 
@@ -299,7 +345,7 @@ function Dashboard() {
       const reader = new FileReader();
       reader.onloadend = async () => {
         setProfile({ ...profile, avatar: reader.result });
-        await setDoc(doc(db, "users", auth.currentUser.uid), { avatar: reader.result }, { merge: true });
+        await setDoc(doc(db, "users", currentUserId), { avatar: reader.result }, { merge: true });
       };
       reader.readAsDataURL(file);
     }
@@ -307,40 +353,42 @@ function Dashboard() {
 
   const handleUpdateProfile = async (e) => {
     e.preventDefault();
-    if (!profile.name.trim()) return;
+    if (!profile.name.trim()) {
+      alert("Name parameters cannot be left blank!"); return;
+    }
     try {
-      if (auth.currentUser) {
+      if (auth.currentUser && currentUserId) {
         await updateProfile(auth.currentUser, { displayName: profile.name.trim() });
-        await setDoc(doc(db, "users", auth.currentUser.uid), { name: profile.name.trim() }, { merge: true });
+        await setDoc(doc(db, "users", currentUserId), { name: profile.name.trim() }, { merge: true });
       }
-      setProfileMessage("Profile updated successfully!");
+      setProfileMessage("Profile records verified and updated successfully!");
     } catch (err) {
-      setProfileError("Failed to update profile.");
+      setProfileError("Failed to synchronization profile name.");
     }
   };
 
   const handleChangePassword = async (e) => {
     e.preventDefault();
     if (newPassword !== confirmPassword) {
-      setProfileError("Passwords do not match!");
+      setProfileError("Passwords matching evaluation failed!");
       return;
     }
     try {
       if (auth.currentUser) {
         await updatePassword(auth.currentUser, newPassword);
-        setProfileMessage("Password changed successfully!");
+        setProfileMessage("Security access key modified successfully!");
         setNewPassword("");
         setConfirmPassword("");
       }
     } catch (err) {
-      setProfileError("Failed to change password. Re-login and try again.");
+      setProfileError("Failed to update password configuration. Please log in again and retry.");
     }
   };
 
   // Calculations
   const roomTotal = expenses.reduce((sum, exp) => sum + Number(exp.amount), 0);
   const perHeadShare = roomMembersCount > 0 ? roomTotal / roomMembersCount : 0;
-  const myPaidTotal = expenses.filter(exp => exp.addedById === auth.currentUser?.uid).reduce((sum, exp) => sum + Number(exp.amount), 0);
+  const myPaidTotal = expenses.filter(exp => exp.addedById === currentUserId).reduce((sum, exp) => sum + Number(exp.amount), 0);
 
   const memberBalances = {};
   expenses.forEach(exp => {
@@ -368,49 +416,36 @@ function Dashboard() {
 
   const exportToPDF = () => {
     if (expenses.length === 0) {
-      alert("No data available to export!");
-      return;
+      alert("No database record metrics available for export!"); return;
     }
     try {
       const { jsPDF } = window.jspdf;
       const pdfDoc = new jsPDF();
-      pdfDoc.text(`${myRoomName || "Roomies"} Expense Report - ${selectedMonth}`, 14, 15);
-      pdfDoc.text(`Total Amount: INR ${roomTotal.toFixed(2)}`, 14, 23);
-      pdfDoc.text(`Per Head Share: INR ${perHeadShare.toFixed(2)} (Total Members: ${roomMembersCount})`, 14, 29);
+      pdfDoc.text(`${myRoomName || "Roomies"} Expense Ledger Summary - ${selectedMonth}`, 14, 15);
+      pdfDoc.text(`Total Aggregation: INR ${roomTotal.toFixed(2)}`, 14, 23);
+      pdfDoc.text(`Divided Core Share: INR ${perHeadShare.toFixed(2)} (Active Size: ${roomMembersCount})`, 14, 29);
       
       const tableRows = expenses.map(exp => [
-        exp.title, 
-        exp.category, 
-        `INR ${Number(exp.amount).toFixed(2)}`, 
-        exp.addedBy || "Member", 
-        exp.date || "N/A"
+        exp.title, exp.category, `INR ${Number(exp.amount).toFixed(2)}`, exp.addedBy || "Member", exp.date || "N/A"
       ]);
 
       pdfDoc.autoTable({
-        head: [["Description", "Category", "Amount", "Added By", "Date"]],
-        body: tableRows,
-        startY: 36,
+        head: [["Description", "Category", "Amount", "Authorized By", "Timestamp"]],
+        body: tableRows, startY: 36,
       });
 
-      pdfDoc.save(`Expense_Report_${selectedMonth.replace(/\s+/g, "_")}.pdf`);
-    } catch (error) {
-      alert("PDF generator initialize nahi ho pa raha hai.");
-    }
+      pdfDoc.save(`Expense_Statement_${selectedMonth.replace(/\s+/g, "_")}.pdf`);
+    } catch (error) { alert("Initialization parameter failure within PDF rendering instance."); }
   };
 
   const exportToCSV = () => {
     if (expenses.length === 0) {
-      alert("No data available to export!");
-      return;
+      alert("No data available to export!"); return;
     }
     try {
       const headers = ["Description", "Category", "Amount (INR)", "Added By", "Date"];
       const rows = expenses.map(exp => [
-        `"${exp.title.replace(/"/g, '""')}"`,
-        `"${exp.category}"`,
-        exp.amount,
-        `"${exp.addedBy || "Member"}"`,
-        `"${exp.date || "N/A"}"`
+        `"${exp.title.replace(/"/g, '""')}"`, `"${exp.category}"`, exp.amount, `"${exp.addedBy || "Member"}"`, `"${exp.date || "N/A"}"`
       ]);
 
       const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
@@ -421,9 +456,7 @@ function Dashboard() {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-    } catch (error) {
-      alert("Failed to export CSV.");
-    }
+    } catch (error) { alert("An error occurred during localized dataset compilation."); }
   };
 
   const navToTab = (tab) => {
@@ -438,7 +471,7 @@ function Dashboard() {
       <div className="md:hidden flex items-center justify-between bg-white px-5 py-4 border-b border-gray-100 sticky top-0 z-40 w-full">
         <div>
           <h1 className="text-lg font-bold text-[#0d9488] tracking-tight">Roomies</h1>
-          <p className="text-[10px] text-gray-400">{myRoomName ? `${myRoomName}` : "No Room"}</p>
+          <p className="text-[10px] text-gray-400">{myRoomName ? `${myRoomName}` : "No Active Space Instance"}</p>
         </div>
         <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 text-gray-600 focus:outline-none text-xl font-bold">
           {isSidebarOpen ? "✕" : "☰"}
@@ -446,42 +479,31 @@ function Dashboard() {
       </div>
 
       {/* BACKDROP FOR MOBILE SIDEBAR */}
-      {isSidebarOpen && (
-        <div onClick={() => setIsSidebarOpen(false)} className="fixed inset-0 bg-black/30 backdrop-blur-xs z-40 md:hidden" />
-      )}
+      {isSidebarOpen && <div onClick={() => setIsSidebarOpen(false)} className="fixed inset-0 bg-black/30 backdrop-blur-xs z-40 md:hidden" />}
 
       {/* SIDEBAR */}
       <div className={`fixed top-0 bottom-0 left-0 z-50 w-[260px] bg-white border-r border-gray-100 flex flex-col justify-between p-6 transition-transform duration-300 md:translate-x-0 md:sticky md:h-screen shrink-0 ${isSidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
         <div>
           <div className="mb-6 hidden md:block">
             <h1 className="text-xl font-bold text-[#0d9488] tracking-tight">Roomies</h1>
-            <p className="text-xs text-gray-400 mt-0.5">{myRoomName ? `${myRoomName} ▾` : "No Room Connected ▾"}</p>
-            {myRoomCode && (
+            <p className="text-xs text-gray-400 mt-0.5">{isSuperAdmin ? "👑 Master Administration View" : (myRoomName ? `${myRoomName} ▾` : "No Selected Space ▾")}</p>
+            {myRoomCode && !isSuperAdmin && (
               <div className="space-y-1 mt-1">
                 <p className="text-[10px] bg-gray-100 text-gray-600 px-2 py-0.5 rounded inline-block font-mono font-bold">Code: {myRoomCode}</p>
-                <p className="text-[10px] text-teal-600 block font-semibold">👥 {roomMembersCount} Members Active</p>
+                <p className="text-[10px] text-teal-600 block font-semibold">👥 {roomMembersCount} Active Members</p>
               </div>
             )}
           </div>
 
-          {myRoomCode && (
-            <div className="md:hidden bg-gray-50 p-2 rounded-lg mb-4 text-[11px] font-medium space-y-0.5">
-              <span className="text-gray-500 block">Room Code: <strong className="font-mono text-gray-800">{myRoomCode}</strong></span>
-              <span className="text-teal-600 block">👥 {roomMembersCount} Members Active</span>
-            </div>
-          )}
-
           <div className="flex items-center space-x-3 p-2 bg-gray-50 rounded-xl mb-4">
-            {profile.avatar ? (
-              <img src={profile.avatar} alt="Avatar" className="w-10 h-10 rounded-full object-cover border border-gray-200" />
-            ) : (
-              <div className="w-10 h-10 rounded-full bg-[#0d9488]/20 flex items-center justify-center font-bold text-[#0d9488]">
-                {profile.name.charAt(0).toUpperCase()}
-              </div>
-            )}
+            <div className="w-10 h-10 rounded-full bg-[#0d9488]/20 flex items-center justify-center font-bold text-[#0d9488]">
+              {profile.name ? profile.name.charAt(0).toUpperCase() : "?"}
+            </div>
             <div className="overflow-hidden">
-              <h4 className="text-sm font-semibold text-gray-800 leading-tight truncate w-[130px]">{profile.name}</h4>
-              <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium inline-block mt-0.5 ${profile.role === "Admin" ? "bg-teal-50 text-teal-600" : "bg-gray-100 text-gray-500"}`}>
+              <h4 className="text-sm font-semibold text-gray-800 leading-tight truncate w-[130px]">
+                {profile.name && profile.name.trim() !== "" ? profile.name : "Guest Session"}
+              </h4>
+              <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium inline-block mt-0.5 ${isSuperAdmin ? "bg-purple-100 text-purple-700" : "bg-gray-100 text-gray-500"}`}>
                 @{profile.role.toLowerCase()}
               </span>
             </div>
@@ -494,19 +516,10 @@ function Dashboard() {
             <button onClick={() => navToTab("profile")} className={`w-full text-left flex items-center space-x-3 px-4 py-2.5 rounded-xl font-medium text-sm transition-colors ${activeTab === "profile" ? "bg-[#e6f4f2] text-[#0d9488] font-semibold" : "text-gray-500 hover:bg-gray-50"}`}><span>My Profile</span></button>
             <button onClick={() => navToTab("settings")} className={`w-full text-left flex items-center space-x-3 px-4 py-2.5 rounded-xl font-medium text-sm transition-colors ${activeTab === "settings" ? "bg-[#e6f4f2] text-[#0d9488] font-semibold" : "text-gray-500 hover:bg-gray-50"}`}><span>Settings</span></button>
           </nav>
-
-          {/* Contact Support Section */}
-          <div className="p-3 bg-teal-50/60 border border-teal-100 rounded-xl space-y-2 text-xs">
-            <p className="font-bold text-teal-800">🛠️ Contact Support</p>
-            <p className="text-gray-600">📞 <span className="font-mono">+91 8930576568</span></p>
-            <a href="mailto:ankitsaklani462@gmail.com" className="text-teal-600 block truncate underline hover:text-teal-800">
-              ✉️ ankitsaklani462@gmail.com
-            </a>
-          </div>
         </div>
 
         <div className="space-y-1 pt-2 border-t border-gray-100">
-          <button onClick={() => { if(window.confirm("Do you want to logout?")) navigate("/"); }} className="w-full flex items-center space-x-3 px-4 py-2 rounded-xl text-gray-400 hover:text-red-500 hover:bg-red-50 text-xs font-medium transition-colors text-left">
+          <button onClick={() => { if(window.confirm("Confirm account log out request?")) navigate("/"); }} className="w-full flex items-center space-x-3 px-4 py-2 rounded-xl text-gray-400 hover:text-red-500 hover:bg-red-50 text-xs font-medium transition-colors text-left">
             <span>Logout</span>
           </button>
         </div>
@@ -514,6 +527,18 @@ function Dashboard() {
 
       {/* MAIN CONTENT AREA */}
       <div className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto h-auto md:h-screen pb-24 w-full">
+        
+        {/* BANNER FOR BLANK PROFILE NAME HANDLING */}
+        {(!profile.name || profile.name.trim() === "") && (
+          <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div>
+              <h4 className="text-sm font-bold text-amber-800">Profile Configuration Incomplete</h4>
+              <p className="text-xs text-amber-600">Please provide your Full Name to validate database tracking metrics across workspace fields.</p>
+            </div>
+            <button onClick={() => navToTab("profile")} className="bg-amber-600 text-white px-3 py-1.5 rounded-xl text-xs font-bold shrink-0">Complete Profile</button>
+          </div>
+        )}
+
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
           <h2 className="text-xl sm:text-2xl font-bold text-gray-800 capitalize">
             {activeTab === "expenses" ? "Room Expenses" : activeTab === "profile" ? "My Profile" : activeTab}
@@ -532,33 +557,33 @@ function Dashboard() {
         
         {activeTab === "dashboard" && (
           <div className="space-y-6">
-            {!myRoomCode && (
+            {!myRoomCode && !isSuperAdmin && (
               <div className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-2xl text-xs font-semibold flex flex-col sm:flex-row gap-2 justify-between sm:items-center">
-                <span>You have not joined any Room yet. Go to "My Profile" to Create or Join a Room!</span>
+                <span>No active workspace group detected. Access your user profile parameters to link/generate a Room configuration.</span>
                 <button onClick={() => setActiveTab("profile")} className="bg-amber-600 text-white px-3 py-1 rounded-lg text-[11px] self-start sm:self-auto shrink-0">Setup Room</button>
               </div>
             )}
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6">
               <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm">
-                <span className="text-xs font-semibold text-gray-400">My Paid Amount</span>
+                <span className="text-xs font-semibold text-gray-400">Personal Contribution Total</span>
                 <h3 className="text-xl sm:text-2xl font-bold text-gray-800 mt-1">₹{myPaidTotal.toFixed(2)}</h3>
               </div>
               <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm">
-                <span className="text-xs font-semibold text-gray-400">Room Total</span>
+                <span className="text-xs font-semibold text-gray-400">Workspace Aggregate Total</span>
                 <h3 className="text-xl sm:text-2xl font-bold text-[#0d9488] mt-1">₹{roomTotal.toFixed(2)}</h3>
               </div>
               <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm">
-                <span className="text-xs font-semibold text-gray-400">Per Head Share</span>
+                <span className="text-xs font-semibold text-gray-400">Per Head Share Split</span>
                 <h3 className="text-xl sm:text-2xl font-bold text-gray-800 mt-1">₹{perHeadShare.toFixed(2)}</h3>
               </div>
             </div>
 
             <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 shadow-sm">
-              <h4 className="text-sm font-bold text-gray-800 mb-4">Roommates Summary</h4>
+              <h4 className="text-sm font-bold text-gray-800 mb-4">Roommates Summary Analytics</h4>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {Object.keys(memberBalances).length === 0 ? (
-                  <p className="text-xs text-gray-400">No expenses recorded yet.</p>
+                  <p className="text-xs text-gray-400">No analytical metric records saved.</p>
                 ) : (
                   Object.keys(memberBalances).map((name) => {
                     const paid = memberBalances[name];
@@ -567,12 +592,12 @@ function Dashboard() {
                       <div key={name} className="p-4 border border-gray-100 rounded-xl bg-gray-50/50">
                         <h5 className="text-xs font-bold text-gray-800">{name}</h5>
                         <div className="flex justify-between text-[11px] mt-2 text-gray-500">
-                          <span>Total Spent:</span> <span className="font-bold">₹{paid.toFixed(2)}</span>
+                          <span>Total Contributed:</span> <span className="font-bold">₹{paid.toFixed(2)}</span>
                         </div>
                         <div className="flex justify-between text-[11px] mt-1">
-                          <span>Status:</span>
+                          <span>Status Node:</span>
                           <span className={`font-bold ${net >= 0 ? "text-green-600" : "text-red-500"}`}>
-                            {net >= 0 ? `Gets back ₹${net.toFixed(2)}` : `Owes ₹${Math.abs(net).toFixed(2)}`}
+                            {net >= 0 ? `Receives back ₹${net.toFixed(2)}` : `Owes balance of ₹${Math.abs(net).toFixed(2)}`}
                           </span>
                         </div>
                       </div>
@@ -583,36 +608,36 @@ function Dashboard() {
             </div>
 
             <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 shadow-sm">
-              <h4 className="text-sm font-bold text-gray-800 mb-4">Whole Room Expenses Log</h4>
+              <h4 className="text-sm font-bold text-gray-800 mb-4">Comprehensive Core Ledger Log</h4>
               <div className="overflow-x-auto w-full inline-block align-middle">
                 <div className="min-w-[600px] overflow-hidden">
                   <table className="w-full text-left border-collapse text-xs">
                     <thead>
                       <tr className="border-b border-gray-100 text-gray-400">
                         <th className="pb-3 font-semibold">Description</th>
-                        <th className="pb-3 font-semibold">Category</th>
-                        <th className="pb-3 font-semibold">Brought By</th>
-                        <th className="pb-3 font-semibold">Date</th>
-                        <th className="pb-3 font-semibold text-right">Amount</th>
-                        <th className="pb-3 text-center">Action</th>
+                        <th className="pb-3 font-semibold">Category Type</th>
+                        <th className="pb-3 font-semibold">Logged By</th>
+                        <th className="pb-3 font-semibold">Timestamp</th>
+                        <th className="pb-3 font-semibold text-right">Net Value</th>
+                        <th className="pb-3 text-center">Action Node</th>
                       </tr>
                     </thead>
                     <tbody>
                       {expenses.length === 0 ? (
-                        <tr><td colSpan="6" className="text-center py-4 text-gray-400">No expenses found.</td></tr>
+                        <tr><td colSpan="6" className="text-center py-4 text-gray-400">No historical data logs tracked.</td></tr>
                       ) : (
                         expenses.map((exp) => (
                           <tr key={exp.id} className="border-b border-gray-50 last:border-none hover:bg-gray-50/50">
                             <td className="py-3 font-medium text-gray-800 capitalize">{exp.title}</td>
                             <td className="py-3 text-gray-500"><span className="bg-gray-100 px-2 py-0.5 rounded-full">{exp.category}</span></td>
-                            <td className="py-3 text-gray-700 font-semibold">{exp.addedBy}</td>
+                            <td className="py-3 text-gray-700 font-semibold">{exp.addedBy || "—"}</td>
                             <td className="py-3 text-gray-400">{exp.date || "N/A"}</td>
                             <td className="py-3 font-bold text-gray-800 text-right">₹{Number(exp.amount).toFixed(2)}</td>
                             <td className="py-3 text-center">
-                              {exp.addedById === auth.currentUser?.uid ? (
+                              {(isSuperAdmin || exp.addedById === currentUserId) ? (
                                 <button onClick={() => handleDeleteExpense(exp.id, exp.addedById)} className="text-red-500 hover:text-red-700 font-bold px-2 py-0.5 rounded hover:bg-red-50">Delete</button>
                               ) : (
-                                <span className="text-gray-300 text-[10px] italic">Locked</span>
+                                <span className="text-gray-300 text-[10px] italic">Locked Parameter</span>
                               )}
                             </td>
                           </tr>
@@ -628,7 +653,7 @@ function Dashboard() {
 
         {activeTab === "expenses" && (
           <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 shadow-sm">
-            <h4 className="text-sm font-bold text-gray-800 mb-6">Room Expenses Log ({myRoomName || "None"})</h4>
+            <h4 className="text-sm font-bold text-gray-800 mb-6">Room Expenses Dynamic Statement ({myRoomName || "Unlinked Block"})</h4>
             <div className="overflow-x-auto w-full">
               <div className="min-w-[550px]">
                 <table className="w-full text-left border-collapse text-sm">
@@ -636,9 +661,9 @@ function Dashboard() {
                     <tr className="border-b border-gray-100 text-gray-400 text-xs">
                       <th className="pb-3 font-semibold">Description</th>
                       <th className="pb-3 font-semibold">Category</th>
-                      <th className="pb-3 font-semibold">Paid By</th>
-                      <th className="pb-3 font-semibold">Date</th>
-                      <th className="pb-3 font-semibold text-right">Amount</th>
+                      <th className="pb-3 font-semibold">Paid Source</th>
+                      <th className="pb-3 font-semibold">Date Input</th>
+                      <th className="pb-3 font-semibold text-right">Value Metric</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -661,11 +686,11 @@ function Dashboard() {
         {activeTab === "settlements" && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
             <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 lg:col-span-7 shadow-sm">
-              <h4 className="text-sm font-bold text-gray-800 mb-1">Room Share Summary</h4>
-              <p className="text-xs text-gray-400 mb-4">Total Expense: ₹{roomTotal.toFixed(2)} | Per Head Share: ₹{perHeadShare.toFixed(2)}</p>
+              <h4 className="text-sm font-bold text-gray-800 mb-1">Workspace Allocation Ratio</h4>
+              <p className="text-xs text-gray-400 mb-4">Aggregate Value: ₹{roomTotal.toFixed(2)} | Normalized Share Split: ₹{perHeadShare.toFixed(2)}</p>
               <div className="space-y-3">
                 {Object.keys(memberBalances).length === 0 ? (
-                  <div className="bg-emerald-50 text-emerald-800 p-4 rounded-xl text-xs font-semibold text-center">No expenses tracked yet.</div>
+                  <div className="bg-emerald-50 text-emerald-800 p-4 rounded-xl text-xs font-semibold text-center">No structural parameters detected.</div>
                 ) : (
                   Object.keys(memberBalances).map((name) => {
                     const paid = memberBalances[name];
@@ -674,10 +699,10 @@ function Dashboard() {
                       <div key={name} className="flex flex-col sm:flex-row sm:justify-between sm:items-center p-4 border border-gray-100 rounded-xl bg-gray-50/50 gap-2">
                         <div>
                           <h5 className="text-xs font-bold text-gray-800">{name}</h5>
-                          <p className="text-[11px] text-gray-400">Total Spent: ₹{paid.toFixed(2)}</p>
+                          <p className="text-[11px] text-gray-400">Total Spent Metrics: ₹{paid.toFixed(2)}</p>
                         </div>
                         <span className={`text-xs font-bold px-3 py-1 rounded-lg self-start sm:self-auto ${net >= 0 ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
-                          {net >= 0 ? `Gets back: ₹${net.toFixed(2)}` : `Owes: ₹${Math.abs(net).toFixed(2)}`}
+                          {net >= 0 ? `Receives back: ₹${net.toFixed(2)}` : `Owes balance: ₹${Math.abs(net).toFixed(2)}`}
                         </span>
                       </div>
                     );
@@ -687,17 +712,17 @@ function Dashboard() {
             </div>
 
             <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 lg:col-span-5 shadow-sm">
-              <h4 className="text-sm font-bold text-gray-800 mb-1">Who Owes Whom</h4>
-              <p className="text-xs text-gray-400 mb-4">Clear balances easily.</p>
+              <h4 className="text-sm font-bold text-gray-800 mb-1">Transactional Allocation Engine</h4>
+              <p className="text-xs text-gray-400 mb-4">Localized balance evaluations.</p>
               <div className="space-y-3">
                 {roomTotal === 0 ? (
-                  <p className="text-xs text-gray-400 text-center py-4">No transactions to display.</p>
+                  <p className="text-xs text-gray-400 text-center py-4">No parameters found to calculate matrix execution paths.</p>
                 ) : getSettlementMatrix().length === 0 ? (
-                  <div className="bg-green-50 text-green-800 p-4 rounded-xl text-xs font-semibold text-center">🎉 Everyone is squared away!</div>
+                  <div className="bg-green-50 text-green-800 p-4 rounded-xl text-xs font-semibold text-center">🎉 Workspace matrix parameters successfully squared away!</div>
                 ) : (
                   getSettlementMatrix().map((tx, idx) => (
                     <div key={idx} className="p-3 bg-amber-50/60 border border-amber-100 rounded-xl text-xs leading-relaxed">
-                      <span className="font-bold text-red-600">{tx.from}</span> will pay <span className="font-bold text-green-700">₹{tx.amount.toFixed(2)}</span> to <span className="font-bold text-teal-800">{tx.to}</span>
+                      <span className="font-bold text-red-600">{tx.from}</span> transfers <span className="font-bold text-green-700">₹{tx.amount.toFixed(2)}</span> to internal node <span className="font-bold text-teal-800">{tx.to}</span>
                     </div>
                   ))
                 )}
@@ -710,36 +735,36 @@ function Dashboard() {
           <div className="space-y-6">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
               <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 shadow-sm space-y-4">
-                <h4 className="text-sm font-bold text-gray-800 mb-1">Create New Room</h4>
+                <h4 className="text-sm font-bold text-gray-800 mb-1">Initialize Workspace Node</h4>
                 <form onSubmit={handleCreateRoom} className="space-y-3">
-                  <input type="text" placeholder="e.g. Room No. 4" value={roomName} onChange={(e) => setRoomName(e.target.value)} className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none" required />
-                  <button type="submit" className="bg-[#0d9488] text-white px-4 py-2 rounded-xl text-xs font-bold w-full">Create & Get Code</button>
+                  <input type="text" placeholder="e.g. Unit Suite 4" value={roomName} onChange={(e) => setRoomName(e.target.value)} className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none" required />
+                  <button type="submit" className="bg-[#0d9488] text-white px-4 py-2 rounded-xl text-xs font-bold w-full">Generate Access Reference Code</button>
                 </form>
               </div>
 
               <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 shadow-sm space-y-4">
-                <h4 className="text-sm font-bold text-gray-800 mb-1">Join Existing Room</h4>
+                <h4 className="text-sm font-bold text-gray-800 mb-1">Link External Workspace Instance</h4>
                 <form onSubmit={handleJoinRoom} className="space-y-3">
-                  <input type="text" placeholder="Enter Invite Code" value={inviteCodeInput} onChange={(e) => setInviteCodeInput(e.target.value)} className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 uppercase tracking-wider focus:outline-none" required />
-                  <button type="submit" className="bg-gray-800 text-white px-4 py-2 rounded-xl text-xs font-bold w-full">Join Room</button>
+                  <input type="text" placeholder="Insert Token Code" value={inviteCodeInput} onChange={(e) => setInviteCodeInput(e.target.value)} className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 uppercase tracking-wider focus:outline-none" required />
+                  <button type="submit" className="bg-gray-800 text-white px-4 py-2 rounded-xl text-xs font-bold w-full">Sync with Reference Block</button>
                 </form>
               </div>
 
               <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 shadow-sm flex flex-col items-center justify-center text-center col-span-1 sm:col-span-2 lg:col-span-1">
                 {myRoomCode ? (
                   <div className="space-y-2">
-                    <h5 className="text-xs font-bold text-gray-800">Scan QR to Join Room</h5>
+                    <h5 className="text-xs font-bold text-gray-800">Scan Matrix Token</h5>
                     <div className="bg-white p-2 border border-gray-100 rounded-xl shadow-xs inline-block">
                       <canvas ref={canvasRef} width="130" height="130" className="mx-auto" />
                     </div>
                     <div>
-                      <p className="text-[10px] font-mono font-bold text-teal-600 bg-teal-50 px-2 py-0.5 rounded-md inline-block">Room ID: {myRoomCode}</p>
+                      <p className="text-[10px] font-mono font-bold text-teal-600 bg-teal-50 px-2 py-0.5 rounded-md inline-block">Token Key: {myRoomCode}</p>
                     </div>
                   </div>
                 ) : (
                   <div className="text-gray-300 text-center p-4">
                     <div className="text-2xl mb-1">🔳</div>
-                    <p className="text-[11px] max-w-[160px]">Create or join a room to generate group QR code.</p>
+                    <p className="text-[11px] max-w-[160px]">Create or join a space instance to generate localized QR configurations.</p>
                   </div>
                 )}
               </div>
@@ -747,32 +772,32 @@ function Dashboard() {
 
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
               <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 shadow-sm lg:col-span-7 space-y-6">
-                <h4 className="text-sm font-bold text-gray-800 mb-1">Personal Details</h4>
+                <h4 className="text-sm font-bold text-gray-800 mb-1">Identity Parameter Settings</h4>
                 <form onSubmit={handleUpdateProfile} className="space-y-4">
                   <div>
-                    <label className="text-xs font-bold text-gray-500 block mb-1">Full Name</label>
-                    <input type="text" value={profile.name} onChange={(e) => setProfile({...profile, name: e.target.value})} className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none" required />
+                    <label className="text-xs font-bold text-gray-500 block mb-1">Full Identity Name</label>
+                    <input type="text" value={profile.name || ""} placeholder="Enter your full legal profile name..." onChange={(e) => setProfile({...profile, name: e.target.value})} className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none" required />
                   </div>
                   <div>
-                    <label className="text-xs font-bold text-gray-500 block mb-1">Email Address (Read-only)</label>
+                    <label className="text-xs font-bold text-gray-500 block mb-1">Email Endpoint (Protected Fields)</label>
                     <input type="email" value={profile.email} className="w-full px-4 py-2 bg-gray-100 border border-gray-200 rounded-xl text-xs text-gray-400 cursor-not-allowed focus:outline-none" readOnly />
                   </div>
-                  <button type="submit" className="bg-[#0d9488] text-white px-4 py-2 rounded-xl text-xs font-bold">Update Profile Name</button>
+                  <button type="submit" className="bg-[#0d9488] text-white px-4 py-2 rounded-xl text-xs font-bold">Commit Profile Parameter Updates</button>
                 </form>
 
                 <hr className="border-gray-100" />
 
-                <h4 className="text-sm font-bold text-gray-800 mb-1">Security & Password</h4>
+                <h4 className="text-sm font-bold text-gray-800 mb-1">Security Access Overrides</h4>
                 <form onSubmit={handleChangePassword} className="space-y-4">
                   <div>
-                    <label className="text-xs font-bold text-gray-500 block mb-1">New Password</label>
-                    <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none" placeholder="Minimum 6 characters" required />
+                    <label className="text-xs font-bold text-gray-500 block mb-1">New Access Token Password</label>
+                    <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none" placeholder="Minimum length of 6 tokens" required />
                   </div>
                   <div>
-                    <label className="text-xs font-bold text-gray-500 block mb-1">Confirm New Password</label>
+                    <label className="text-xs font-bold text-gray-500 block mb-1">Confirm Security Token Match</label>
                     <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none" required />
                   </div>
-                  <button type="submit" className="bg-gray-800 text-white px-4 py-2 rounded-xl text-xs font-bold">Update Password</button>
+                  <button type="submit" className="bg-gray-800 text-white px-4 py-2 rounded-xl text-xs font-bold">Modify Cryptographic Key</button>
                 </form>
 
                 {profileMessage && <p className="text-xs text-green-600 font-semibold bg-green-50 p-3 rounded-xl">{profileMessage}</p>}
@@ -780,17 +805,17 @@ function Dashboard() {
               </div>
 
               <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 shadow-sm lg:col-span-5 flex flex-col items-center text-center space-y-4">
-                <h4 className="text-sm font-bold text-gray-800 self-start">Profile Picture</h4>
+                <h4 className="text-sm font-bold text-gray-800 self-start">Visual Token Avatar</h4>
                 {profile.avatar ? (
-                  <img src={profile.avatar} alt="Profile" className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover border-2 border-[#0d9488]/30 shadow-sm" />
+                  <img src={profile.avatar} alt="Profile Source" className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover border-2 border-[#0d9488]/30 shadow-sm" />
                 ) : (
                   <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-full bg-[#0d9488]/10 text-[#0d9488] font-bold text-2xl sm:text-3xl flex items-center justify-center border-2 border-dashed border-[#0d9488]/30">
-                    {profile.name.charAt(0).toUpperCase()}
+                    {profile.name ? profile.name.charAt(0).toUpperCase() : "?"}
                   </div>
                 )}
                 <input type="file" accept="image/*" ref={fileInputRef} onChange={handleAvatarChange} className="hidden" />
                 <button onClick={() => fileInputRef.current?.click()} className="text-xs font-bold text-[#0d9488] bg-[#0d9488]/10 hover:bg-[#0d9488]/20 px-4 py-2 rounded-xl transition-colors">
-                  Upload Custom Image
+                  Upload Asset Stream
                 </button>
               </div>
             </div>
@@ -800,21 +825,21 @@ function Dashboard() {
         {activeTab === "settings" && (
           <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-100 shadow-sm max-w-2xl space-y-6">
             <div>
-              <h4 className="text-sm font-bold text-gray-800">Preferences</h4>
-              <p className="text-xs text-gray-400">Configure client states for local workspace rendering.</p>
+              <h4 className="text-sm font-bold text-gray-800">Preferences Profile</h4>
+              <p className="text-xs text-gray-400">Configure workspace rendering structures.</p>
             </div>
             <hr className="border-gray-100" />
             <div className="flex items-center justify-between gap-4">
               <div>
-                <h5 className="text-xs font-bold text-gray-800">Email Notifications</h5>
-                <p className="text-[11px] text-gray-400 max-w-[200px] sm:max-w-none">Receive weekly layout digests containing group metrics balances.</p>
+                <h5 className="text-xs font-bold text-gray-800">Email Pipeline Logs</h5>
+                <p className="text-[11px] text-gray-400 max-w-[200px] sm:max-w-none">Receive system analytics summaries detailing internal ledger variations.</p>
               </div>
               <input type="checkbox" checked={settings.notifications} onChange={(e) => setSettings({...settings, notifications: e.target.checked})} className="accent-[#0d9488] shrink-0" />
             </div>
             <div className="flex items-center justify-between gap-4">
               <div>
-                <h5 className="text-xs font-bold text-gray-800">Default Group Currency Symbol</h5>
-                <p className="text-[11px] text-gray-400">Base locale formatting config parameter.</p>
+                <h5 className="text-xs font-bold text-gray-800">Locale Target Currency Symbol</h5>
+                <p className="text-[11px] text-gray-400">Base internationalization parameters mapping tool.</p>
               </div>
               <select value={settings.currency} onChange={(e) => setSettings({...settings, currency: e.target.value})} className="bg-gray-50 border border-gray-200 text-gray-800 px-3 py-1.5 rounded-xl text-xs font-semibold focus:outline-none shrink-0">
                 <option value="INR">INR (₹)</option>
@@ -824,20 +849,18 @@ function Dashboard() {
         )}
       </div>
 
-      {/* FLOATING CHATBOT WIDGET */}
+      {/* 🤖 FLOATING CHATBOT WIDGET WITH LIVE GEMINI AI PROCESSING */}
       <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-50 flex flex-col items-end max-w-[calc(100vw-32px)]">
         {isChatOpen && (
           <div className="w-72 sm:w-80 h-80 sm:h-96 bg-white border border-gray-200 rounded-2xl shadow-xl flex flex-col overflow-hidden mb-3">
-            {/* Chat Header */}
             <div className="bg-[#0d9488] text-white px-4 py-3 flex justify-between items-center shrink-0">
               <div>
-                <h4 className="text-xs font-bold">Roomies AI Assistant</h4>
-                <p className="text-[10px] text-teal-100">Standard Response Mode</p>
+                <h4 className="text-xs font-bold">Roomies Gemini AI</h4>
+                <p className="text-[10px] text-teal-100">Live Workspace Analyzer Instance</p>
               </div>
               <button onClick={() => setIsChatOpen(false)} className="text-white hover:text-teal-200 text-lg font-bold">×</button>
             </div>
 
-            {/* Chat Messages Log */}
             <div className="flex-1 p-3 overflow-y-auto space-y-2.5 bg-gray-50 text-xs">
               {chatMessages.map((msg) => (
                 <div key={msg.id} className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}>
@@ -848,61 +871,58 @@ function Dashboard() {
                 </div>
               ))}
               
-              {/* Typing Indicator Loader */}
               {isTyping && (
                 <div className="flex flex-col items-start">
                   <div className="bg-white text-gray-400 border border-gray-100 px-3 py-2 rounded-xl rounded-tl-none italic animate-pulse">
-                    Thinking...
+                    Gemini processing active dataset parameters...
                   </div>
                 </div>
               )}
               <div ref={chatEndRef} />
             </div>
 
-            {/* Chat Input Area */}
             <form onSubmit={handleSendMessage} className="p-2 bg-white border-t border-gray-100 flex items-center space-x-1 shrink-0">
-              <input type="text" placeholder="Type a message..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} className="flex-1 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-xl text-xs focus:outline-none focus:border-[#0d9488]" disabled={isTyping} />
+              <input type="text" placeholder="Ask Gemini about active system analytics..." value={chatInput} onChange={(e) => setChatInput(e.target.value)} className="flex-1 px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-xl text-xs focus:outline-none focus:border-[#0d9488]" disabled={isTyping} />
               <button type="submit" className="bg-[#0d9488] hover:bg-[#0b7a70] text-white px-3 py-1.5 rounded-xl text-xs font-bold disabled:opacity-50" disabled={isTyping}>
-                Send
+                Execute
               </button>
             </form>
           </div>
         )}
 
-        {/* Chat Toggle Button */}
         <button onClick={() => setIsChatOpen(!isChatOpen)} className="bg-[#0d9488] hover:bg-[#0b7a70] text-white w-12 h-12 rounded-full flex items-center justify-center shadow-lg transition-transform hover:scale-105 font-bold text-lg">
           💬
         </button>
       </div>
 
-      {/* Expense Modal */}
+      {/* Expense Modal Popup */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-xs flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl p-5 sm:p-6 w-full max-w-sm shadow-xl border border-gray-50">
             <div className="flex justify-between items-center mb-4">
-              <h4 className="text-sm font-bold text-gray-800">Add New Expense</h4>
+              <h4 className="text-sm font-bold text-gray-800">Log New Data Entry</h4>
               <button onClick={() => setIsModalOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg font-bold">×</button>
             </div>
             <form onSubmit={handleAddExpense} className="space-y-4">
               <div>
-                <label className="text-[11px] font-bold text-gray-400 block mb-1">Description / Item Name</label>
-                <input type="text" placeholder="e.g. Groceries, WiFi Bill" value={title} onChange={(e) => setTitle(e.target.value)} className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none" required />
+                <label className="text-[11px] font-bold text-gray-400 block mb-1">Item Title Field</label>
+                <input type="text" placeholder="e.g. Utility parameters, Logistics" value={title} onChange={(e) => setTitle(e.target.value)} className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none" required />
               </div>
               <div>
-                <label className="text-[11px] font-bold text-gray-400 block mb-1">Amount (₹)</label>
+                <label className="text-[11px] font-bold text-gray-400 block mb-1">Value Amount Configuration (₹)</label>
                 <input type="number" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none" required />
               </div>
               <div>
-                <label className="text-[11px] font-bold text-gray-400 block mb-1">Category</label>
+                <label className="text-[11px] font-bold text-gray-400 block mb-1">Dataset Segment Category</label>
                 <select value={category} onChange={(e) => setCategory(e.target.value)} className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs text-gray-800 focus:outline-none">
-                  <option value="Food">Food & Mess</option>
-                  <option value="Rent">Rent & Maintenance</option>
-                  <option value="Bills">Electricity & Utility Bills</option>
-                  <option value="Entertainment">Outing & Subscriptions</option>
-                  <option value="Others">Miscellaneous</option>
+                  <option value="Food">Food & Mess Management</option>
+                  <option value="Rent">Rent & Facility Maintenance</option>
+                  <option value="Bills">Electricity & Connected Utilities</option>
+                  <option value="Entertainment">Outings & Active Subscriptions</option>
+                  <option value="Others">Miscellaneous Variables</option>
                 </select>
               </div>
-              <button type="submit" className="w-full bg-[#0d9488] text-white py-2 rounded-xl text-xs font-bold shadow-xs">Submit Expense Log</button>
+              <button type="submit" className="w-full bg-[#0d9488] text-white py-2 rounded-xl text-xs font-bold shadow-xs">Commit Entry Node</button>
             </form>
           </div>
         </div>
